@@ -37,7 +37,11 @@ app hoặc khởi động lại máy là mọi thứ trở về bình thường,
 
 ### Theo Claude Code
 
-- Cứ 10 giây app quét cây tiến trình của mọi phiên `claude`, cả bản cài native lẫn bản cài qua `npm`.
+- Chạy được ở mọi nơi bạn dùng Claude Code: **Terminal, iTerm2, terminal trong VS Code / Cursor, extension Claude Code
+  cho VS Code**, Warp, Ghostty, terminal JetBrains. Hỗ trợ cả bản cài native, npm và extension. Mỗi phiên trong menu có
+  ghi rõ đang chạy ở đâu.
+- Cứ 10 giây app tìm các tiến trình Claude Code và đọc trạng thái phiên từ transcript cục bộ của Claude Code (chỉ đọc
+  trên máy bạn, không gửi đi đâu).
 - Một phiên được coi là **bận** khi Claude đang xử lý một lượt, hoặc khi còn lệnh shell do Claude chạy, **kể cả
   tác vụ `run_in_background`** vẫn chạy sau khi lượt đã xong.
 - **Không dùng hooks, không sửa file cấu hình** (`~/.claude/settings.json` giữ nguyên).
@@ -81,8 +85,8 @@ cd KeepAwake
 - **Không kết nối mạng.** App không có bất kỳ code mạng nào: không analytics, không telemetry, không báo lỗi tự
   động, không kiểm tra cập nhật, không theo dõi. Không có thông tin nào về bạn hay máy của bạn được gửi ra ngoài.
   Các link trong màn hình giới thiệu chỉ mở trình duyệt khi bạn bấm vào.
-- **Không thu thập dữ liệu.** Danh sách tiến trình và power assertion chỉ được đọc tại máy, dùng để quyết định ngay
-  lúc đó rồi bỏ đi.
+- **Không thu thập dữ liệu.** Danh sách tiến trình, power assertion và *vài dòng cuối* transcript Claude Code (chỉ để
+  biết lượt làm việc đã xong chưa) được đọc tại máy, dùng ngay rồi bỏ đi; không lưu, không gửi đi đâu.
 - **Chỉ thay đổi hệ thống khi bạn yêu cầu.** Cài đặt hệ thống chỉ đổi khi bạn bấm **Áp dụng**. Lúc đó hộp thoại
   mật khẩu là của macOS; app không bao giờ thấy hay lưu mật khẩu của bạn.
 - **Không daemon chạy nền, không helper quyền root, không quy tắc `sudo`.**

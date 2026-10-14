@@ -52,8 +52,11 @@ so quitting the app or restarting the Mac always brings you back to normal. They
 
 ### Follow Claude Code
 
-- Every 10 seconds the app scans the process tree of every `claude` session. This works with both the native
-  installer and `npm install -g @anthropic-ai/claude-code`.
+- Works wherever you run Claude Code: **Terminal, iTerm2, the VS Code / Cursor integrated terminal, the Claude Code
+  extension for VS Code**, Warp, Ghostty and JetBrains terminals. Native, npm and extension installs are all supported.
+  Each session in the menu is labelled with where it's running.
+- Every 10 seconds the app finds every running Claude Code process and reads its session state from Claude Code's
+  local transcript. The transcript is read only on your Mac and never leaves it.
 - A session counts as **busy** while Claude is processing a turn, or while a shell command it started is still
   running, **including `run_in_background` tasks** that keep going after the turn ends.
 - **No hooks, no config changes.** Nothing in `~/.claude/settings.json` is touched.
@@ -115,8 +118,9 @@ KeepAwake was built to be something you can trust on your machine.
 - **No network access.** The app contains no networking code: no analytics, telemetry, crash reporting,
   update checks or tracking of any kind. Nothing about you or your Mac ever leaves your computer.
   The only links in the app (on the About screen) open your browser when you click them.
-- **No data collection.** The list of running processes and power assertions is read locally, used for the
-  decision at hand, and discarded.
+- **No data collection.** The list of running processes, power assertions and the *last few entries* of Claude Code's
+  local transcripts (only to tell whether a turn is still in progress) are read locally, used for the decision at hand,
+  and discarded. Nothing is stored or sent anywhere.
 - **Changes your system only when you ask.** System settings change only when you click **Apply**. macOS then
   asks for your administrator password in its own dialog; KeepAwake never sees or stores your password.
 - **No background daemons, no privileged helpers, no `sudo` rules.** The app runs as you, with your normal
@@ -154,7 +158,9 @@ KeepAwake was built to be something you can trust on your machine.
 |---|---|
 | Keep awake | `IOPMAssertionCreateWithName` (`PreventUserIdleSystemSleep` / `PreventUserIdleDisplaySleep`) |
 | Always awake | plus `IOPMAssertionDeclareUserActivity` every 30 s, so the screensaver and lock never trigger |
-| Claude Code detection | `sysctl(KERN_PROC_ALL)` + `KERN_PROCARGS2`: `caffeinate` children (a turn in progress) and `~/.claude/shell-snapshots` shells (commands) |
+| Claude Code detection | `sysctl(KERN_PROC_ALL)` + `KERN_PROCARGS2` find `claude` processes; `~/.claude/sessions/<pid>.json` maps each one to its session |
+| Turn in progress | last entry of `~/.claude/projects/<cwd>/<session>.jsonl` (and background `subagents/`): prompt, tool use or tool result means working; `end_turn` or `turn_duration` means done. Falls back to Claude's `caffeinate` child |
+| Running commands | child shells started from `shell-snapshots` (including `run_in_background`) |
 | Sleep blockers | `IOPMCopyAssertionsByProcess` |
 | Force sleep | `pmset sleepnow` |
 | Settings | `pmset -a displaysleep N sleep N` via an administrator prompt |

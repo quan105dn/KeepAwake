@@ -124,6 +124,11 @@ struct ContentView: View {
                         Circle().fill(Color.green).frame(width: 6, height: 6)
                         Text(s.project).font(.system(size: 12, weight: .medium))
                             .lineLimit(1).truncationMode(.middle)
+                            .layoutPriority(1)
+                        if let client = s.client {
+                            Text(client).font(.caption2).foregroundStyle(.secondary)
+                                .lineLimit(1).truncationMode(.tail)
+                        }
                         Spacer(minLength: 4)
                         Text(sessionDetail(s)).font(.caption).foregroundStyle(.secondary)
                             .lineLimit(1).fixedSize()
