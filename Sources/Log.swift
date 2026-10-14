@@ -2,8 +2,9 @@ import Foundation
 
 /// Nhật ký chẩn đoán gọn: ~/Library/Logs/KeepAwake.log (tự cắt khi quá 1 MB).
 enum Log {
-    static let url = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Logs/KeepAwake.log")
+    /// `KEEPAWAKE_LOG` đổi đường dẫn (dùng khi chạy test để không ghi vào log thật).
+    static let url = ProcessInfo.processInfo.environment["KEEPAWAKE_LOG"].map { URL(fileURLWithPath: $0) }
+        ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/KeepAwake.log")
     private static let queue = DispatchQueue(label: "KeepAwake.log")
     private static let formatter: DateFormatter = {
         let f = DateFormatter()

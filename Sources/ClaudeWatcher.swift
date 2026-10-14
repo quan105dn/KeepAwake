@@ -36,28 +36,49 @@ enum ClaudeScanner {
 
     /// - Parameter maxTaskAge: bỏ qua tác vụ chạy lâu hơn mức này (nil = không giới hạn).
     static func scan(maxTaskAge: TimeInterval?) -> [Session] {
+        scan(maxTaskAge: maxTaskAge, diagnostics: false).sessions
+    }
+
+    /// Như `scan`, kèm giải thích từng quyết định và các tiến trình bị loại (cho `KeepAwake --diagnose`).
+    static func diagnose(maxTaskAge: TimeInterval?) -> (sessions: [Session], skipped: [String]) {
+        scan(maxTaskAge: maxTaskAge, diagnostics: true)
+    }
+
+    private static func scan(maxTaskAge: TimeInterval?, diagnostics diag: Bool) -> (sessions: [Session], skipped: [String]) {
         let procs = allProcesses()
         let now = Date()
         var transcriptCache: [String: Transcript.State] = [:]
         var sessions: [Session] = []
+        var skipped: [String] = []
 
-        for claude in procs where isClaudeCode(claude) {
+        for claude in procs {
+            guard isClaudeCode(claude) else {
+                if diag, claude.name == "node", argv(of: claude.pid).joined(separator: " ").contains("claude") {
+                    skipped.append("pid \(claude.pid) node: not recognised as Claude Code (\(redacted(argv(of: claude.pid))))")
+                }
+                continue
+            }
             let args = argv(of: claude.pid)
-            if isHelper(args: args) { continue }
+            if let why = helperReason(args: args) {
+                if diag { skipped.append("pid \(claude.pid) \(claude.name): \(why)") }
+                continue
+            }
             let env = environment(of: claude.pid)
             let configDir = env["CLAUDE_CONFIG_DIR"] ?? (NSHomeDirectory() as NSString).appendingPathComponent(".claude")
             let registry = Registry.read(configDir: configDir, pid: claude.pid)
             let dir = registry?.cwd ?? cwd(of: claude.pid)
             var s = Session(id: claude.pid, project: dir.map { ($0 as NSString).lastPathComponent } ?? "Claude Code")
             s.client = clientName(entrypoint: registry?.entrypoint, termProgram: env["TERM_PROGRAM"])
-            s.debug.append("args: " + args.joined(separator: " ").prefix(100))
-            s.debug.append("registry: " + (registry.map { "session=\($0.sessionId) entrypoint=\($0.entrypoint ?? "-")" }
-                                           ?? "none (\(configDir)/sessions/\(claude.pid).json)"))
-            s.debug.append("cwd: \(dir ?? "?")")
+            if diag {
+                s.debug.append("command: " + redacted(args))
+                s.debug.append("registry: " + (registry.map { "session=\($0.sessionId) entrypoint=\($0.entrypoint ?? "-")" }
+                                               ?? "none (\(configDir)/sessions/\(claude.pid).json)"))
+                s.debug.append("cwd: \(dir ?? "?")")
+            }
 
             var caffeinate = false
             for child in procs where child.ppid == claude.pid {
-                s.debug.append("child: \(child.pid) \(child.name) (\(Int(now.timeIntervalSince(child.start)))s)")
+                if diag { s.debug.append("child: \(child.pid) \(child.name) (\(Int(now.timeIntervalSince(child.start)))s)") }
                 switch child.name {
                 case "caffeinate":
                     caffeinate = true
@@ -73,7 +94,9 @@ enum ClaudeScanner {
             var state = Transcript.State.unknown
             if let dir {
                 let projectDir = Transcript.projectDirectory(configDir: configDir, cwd: dir)
-                s.debug.append("project dir: \(projectDir) [\(FileManager.default.fileExists(atPath: projectDir) ? "exists" : "MISSING")]")
+                if diag {
+                    s.debug.append("project dir: \(projectDir) [\(FileManager.default.fileExists(atPath: projectDir) ? "exists" : "MISSING")]")
+                }
                 if let sessionId = registry?.sessionId {
                     // Biết chính xác phiên của tiến trình này (~/.claude/sessions/<pid>.json).
                     state = Transcript.state(ofSession: sessionId, inProjectDirectory: projectDir, now: now)
@@ -84,7 +107,9 @@ enum ClaudeScanner {
                     transcriptCache[projectDir] = state
                 }
             }
-            s.debug.append("transcript state: \(state); caffeinate child: \(caffeinate); tool shells: \(s.taskAges.count) (+\(s.ignoredTasks) ignored)")
+            if diag {
+                s.debug.append("transcript state: \(state); caffeinate child: \(caffeinate); tool shells: \(s.taskAges.count) (+\(s.ignoredTasks) ignored)")
+            }
             switch state {
             case .inTurn: s.working = true
             case .idle: s.working = false
@@ -92,7 +117,15 @@ enum ClaudeScanner {
             }
             sessions.append(s)
         }
-        return sessions.sorted { $0.project < $1.project }
+        return (sessions.sorted { $0.project < $1.project }, skipped)
+    }
+
+    /// Chỉ giữ tên chương trình và các cờ: không lộ nội dung prompt khi người dùng dán kết quả chẩn đoán.
+    private static func redacted(_ args: [String]) -> String {
+        guard let first = args.first else { return "?" }
+        let flags = args.dropFirst().filter { $0.hasPrefix("-") }.map { $0.split(separator: "=").first.map(String.init) ?? $0 }
+        let hidden = args.count - 1 - flags.count
+        return ([(first as NSString).lastPathComponent] + flags).joined(separator: " ") + (hidden > 0 ? " [+\(hidden) values hidden]" : "")
     }
 
     /// Tên và PID cha của một tiến trình.
@@ -145,12 +178,16 @@ enum ClaudeScanner {
 
     /// Tiến trình phụ của Claude Code, không phải một phiên làm việc (vd. cầu nối Chrome, MCP server, ugrep).
     /// Binary `claude` cũng được dùng để chạy công cụ phụ (vd. `ugrep` cho Grep), khi đó argv[0] là tên công cụ.
-    private static func isHelper(args: [String]) -> Bool {
-        if let first = args.first, !first.isEmpty {
-            let name = (first as NSString).lastPathComponent
-            if name != "node", !name.lowercased().contains("claude") { return true }
+    private static let helperTools: Set<String> = ["ugrep", "rg", "ripgrep", "bfs"]
+
+    /// Lý do tiến trình không phải một phiên làm việc (nil = là phiên).
+    private static func helperReason(args: [String]) -> String? {
+        if let first = args.first, helperTools.contains((first as NSString).lastPathComponent) {
+            return "helper tool (\((first as NSString).lastPathComponent))"
         }
-        return args.contains("--chrome-native-host") || (args.count >= 3 && args[1] == "mcp" && args[2] == "serve")
+        if args.contains("--chrome-native-host") { return "Chrome bridge (--chrome-native-host)" }
+        if args.count >= 3, args[1] == "mcp", args[2] == "serve" { return "MCP server (claude mcp serve)" }
+        return nil
     }
 
     private static func allProcesses() -> [Proc] {
@@ -304,93 +341,154 @@ enum Transcript {
     }
 
     private static func isRecent(_ path: String, now: Date) -> Bool {
-        guard let m = (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date
-        else { return false }
-        return now.timeIntervalSince(m) < staleAfter
+        guard let info = fileInfo(path) else { return false }
+        return now.timeIntervalSince(info.mtime) < staleAfter
+    }
+
+    /// Kích thước và thời điểm sửa của file (nil nếu không tồn tại).
+    static func fileInfo(_ path: String) -> (size: UInt64, mtime: Date)? {
+        var st = stat()
+        guard stat(path, &st) == 0 else { return nil }
+        let t = st.st_mtimespec
+        return (UInt64(st.st_size), Date(timeIntervalSince1970: TimeInterval(t.tv_sec) + TimeInterval(t.tv_nsec) / 1e9))
     }
 
     /// Đọc ngược từ cuối file tới dòng có ý nghĩa gần nhất. Dòng có thể rất dài (ảnh, kết quả lệnh lớn:
-    /// vài MB), nên đọc từng khối 256 KB cho tới khi có dòng hoàn chỉnh, tối đa `maxScan`.
-    /// Kết quả được nhớ theo (kích thước, thời điểm sửa) để không đọc lại file không đổi.
+    /// vài MB). Kết quả được nhớ theo (kích thước, thời điểm sửa) để không đọc lại file không đổi.
     static func lastState(ofFile path: String, skipSidechain: Bool) -> State {
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
-              let size = (attrs[.size] as? NSNumber)?.uint64Value,
-              let mtime = attrs[.modificationDate] as? Date else { return .unknown }
+        guard let info = fileInfo(path) else { return .unknown }
         let key = "\(skipSidechain ? "m" : "s")|\(path)"
         cacheLock.lock()
-        if let c = cache[key], c.size == size, c.mtime == mtime { cacheLock.unlock(); return c.state }
+        if let c = cache[key], c.size == info.size, c.mtime == info.mtime { cacheLock.unlock(); return c.state }
         cacheLock.unlock()
 
-        let state = scanBackwards(path: path, size: size, skipSidechain: skipSidechain)
+        let state = scanBackwards(path: path, size: info.size, skipSidechain: skipSidechain)
         cacheLock.lock()
         if cache.count > 512 { cache.removeAll() }
-        cache[key] = (size, mtime, state)
+        cache[key] = (info.size, info.mtime, state)
         cacheLock.unlock()
         return state
     }
 
+    /// Đọc lùi tối đa ngần này byte; quá thì coi như không đọc được.
     static let maxScan: UInt64 = 64 * 1024 * 1024
     private static let chunk: UInt64 = 256 * 1024
     private static var cache: [String: (size: UInt64, mtime: Date, state: State)] = [:]
     private static let cacheLock = NSLock()
 
+    private enum LineVerdict { case decided(State), skip, unreadable }
+
+    /// Duyệt từng dòng từ cuối file. Mỗi byte chỉ được tìm "\n" một lần; một dòng dài hơn khối đang giữ
+    /// thì đọc riêng đúng một lần, nên chi phí tuyến tính theo số byte đã duyệt.
+    /// - Hết file mà chỉ gặp dòng metadata (phiên mới, chưa có lời nhắn) → `.idle`.
+    /// - Dòng không đọc được, hoặc vượt `maxScan` → `.unknown` (để dùng `caffeinate` làm dự phòng).
     private static func scanBackwards(path: String, size: UInt64, skipSidechain: Bool) -> State {
-        guard size > 0, let handle = FileHandle(forReadingAtPath: path) else { return .unknown }
+        guard size > 0 else { return .idle }
+        guard let handle = FileHandle(forReadingAtPath: path) else { return .unknown }
         defer { try? handle.close() }
         let newline = UInt8(ascii: "\n")
-        var buffer = Data()         // byte từ `pos` tới phần đã xử lý (chưa thành dòng hoàn chỉnh)
-        var pos = size
-        while pos > 0, size - pos < maxScan {
-            let readSize = min(chunk, pos)
-            pos -= readSize
-            handle.seek(toFileOffset: pos)
-            buffer = handle.readData(ofLength: Int(readSize)) + buffer
-            // Tách các dòng hoàn chỉnh ở cuối buffer (đứng sau một ký tự xuống dòng).
-            while let nl = buffer.lastIndex(of: newline) {
-                let line = buffer[buffer.index(after: nl)...]
-                buffer = buffer[..<nl]
-                if !line.isEmpty, let s = state(ofLine: Data(line), skipSidechain: skipSidechain) { return s }
+
+        /// Vị trí "\n" cuối cùng trong `data[..<end]` (quét con trỏ byte, nhanh hơn duyệt Collection).
+        func lastNewline(_ data: Data, before end: Int) -> Int? {
+            data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Int? in
+                var i = end - 1
+                while i >= 0 {
+                    if raw[i] == newline { return data.startIndex + i }
+                    i -= 1
+                }
+                return nil
             }
         }
-        // Dòng đầu file (không có ký tự xuống dòng đứng trước).
-        if pos == 0, !buffer.isEmpty, let s = state(ofLine: buffer, skipSidechain: skipSidechain) { return s }
-        return .unknown
+        func read(_ from: UInt64, _ to: UInt64) -> Data {
+            handle.seek(toFileOffset: from)
+            return handle.readData(ofLength: Int(to - from))
+        }
+        func judge(_ line: Data) -> LineVerdict {
+            if line.isEmpty { return .skip }
+            switch verdict(ofLine: line, skipSidechain: skipSidechain) {
+            case .some(let v): return v
+            case .none: return .skip
+            }
+        }
+
+        var lineEnd = size                       // dòng đang xét kết thúc ở đây (không gồm "\n")
+        var buf = read(size - min(chunk, size), size)
+        var bufStart = size - UInt64(buf.count)  // buf = [bufStart, bufStart + buf.count)
+        // Dòng cuối chưa có "\n" = Claude Code đang ghi dở; đọc hỏng thì bỏ qua thay vì "không đọc được".
+        var partialTail = buf.last != newline
+        func judgeTail(_ line: Data) -> LineVerdict {
+            let v = judge(line)
+            defer { partialTail = false }
+            if partialTail, case .unreadable = v { return .skip }
+            return v
+        }
+        while true {
+            if size - lineEnd > maxScan { return .unknown }
+            // Tìm "\n" trước lineEnd trong khối đang giữ.
+            let localEnd = Int(lineEnd - bufStart)
+            if let nl = lastNewline(buf, before: localEnd) {
+                let line = buf[buf.index(after: nl) ..< buf.startIndex + localEnd]
+                switch judgeTail(Data(line)) {
+                case .decided(let s): return s
+                case .unreadable: return .unknown
+                case .skip: lineEnd = bufStart + UInt64(nl - buf.startIndex)
+                }
+                continue
+            }
+            if bufStart == 0 {                   // dòng đầu file
+                switch judgeTail(Data(buf.prefix(localEnd))) {
+                case .decided(let s): return s
+                case .unreadable: return .unknown
+                case .skip: return .idle
+                }
+            }
+            // Dòng dài hơn khối: lùi tiếp, chỉ quét các khối mới để tìm đầu dòng, rồi đọc cả dòng một lần.
+            var pos = bufStart, lineStart: UInt64 = 0, last = Data(), lastStart: UInt64 = 0
+            while pos > 0 {
+                if size - pos > maxScan { return .unknown }
+                let from = pos - min(chunk, pos)
+                let block = read(from, pos)
+                if let nl = lastNewline(block, before: block.count) {
+                    lineStart = from + UInt64(nl - block.startIndex) + 1
+                    last = block; lastStart = from
+                    break
+                }
+                pos = from
+                if pos == 0 { last = Data(); lastStart = 0 }
+            }
+            switch judgeTail(read(lineStart, lineEnd)) {
+            case .decided(let s): return s
+            case .unreadable: return .unknown
+            case .skip: break
+            }
+            if lineStart == 0 { return .idle }
+            lineEnd = lineStart - 1
+            buf = last; bufStart = lastStart
+        }
     }
 
-    /// nil = dòng không quyết định trạng thái (hoặc không đọc được).
-    static func state(ofLine line: Data, skipSidechain: Bool) -> State? {
+    /// nil = dòng không quyết định trạng thái (metadata, attachment…).
+    private static func verdict(ofLine line: Data, skipSidechain: Bool) -> LineVerdict? {
         if let obj = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any] {
-            return state(ofEntry: obj, skipSidechain: skipSidechain)
+            return state(ofEntry: obj, skipSidechain: skipSidechain).map { .decided($0) }
         }
         // JSON.stringify của Claude Code giữ nguyên surrogate lẻ ("\ud83d", khi cắt ngắn giữa emoji),
-        // JSONSerialization từ chối → thay chúng rồi thử lại.
-        if let text = String(data: line, encoding: .utf8) {
-            let cleaned = text.replacingOccurrences(of: #"\\u[dD][89a-fA-F][0-9a-fA-F]{2}"#, with: #"\\ufffd"#,
-                                                    options: .regularExpression)
-            if cleaned != text, let obj = (try? JSONSerialization.jsonObject(with: Data(cleaned.utf8))) as? [String: Any] {
-                return state(ofEntry: obj, skipSidechain: skipSidechain)
-            }
-            return heuristicState(text, skipSidechain: skipSidechain)
+        // JSONSerialization từ chối → thay chúng rồi thử lại. Vẫn hỏng thì báo "không đọc được".
+        guard let text = String(data: line, encoding: .utf8) else { return .unreadable }
+        let cleaned = text.replacingOccurrences(of: #"\\u[dD][89a-fA-F][0-9a-fA-F]{2}"#, with: #"\\ufffd"#,
+                                                options: .regularExpression)
+        if cleaned != text, let obj = (try? JSONSerialization.jsonObject(with: Data(cleaned.utf8))) as? [String: Any] {
+            return state(ofEntry: obj, skipSidechain: skipSidechain).map { .decided($0) }
         }
-        return nil
+        return .unreadable
     }
 
-    /// Dự phòng cuối khi dòng vẫn không phải JSON hợp lệ: đọc vài khoá ở đầu dòng.
-    private static func heuristicState(_ text: String, skipSidechain: Bool) -> State? {
-        let head = text.prefix(4096)
-        if skipSidechain, head.contains(#""isSidechain":true"#) { return nil }
-        if head.contains(#""isMeta":true"#) { return nil }
-        guard let r = head.range(of: #""type":"(user|assistant|system)""#, options: .regularExpression) else { return nil }
-        switch head[r] {
-        case #""type":"system""#:
-            return (head.contains(#""subtype":"turn_duration""#) || head.contains(#""subtype":"local_command""#)) ? .idle : nil
-        case #""type":"assistant""#:
-            for stop in ["end_turn", "stop_sequence", "max_tokens", "refusal", "pause_turn"]
-            where text.contains(#""stop_reason":"\#(stop)""#) { return .idle }
-            return .inTurn
-        default:
-            if text.contains("[Request interrupted by user") || text.contains("<local-command-stdout>") { return .idle }
-            return .inTurn
+    /// Dùng trong test: trạng thái của một dòng (nil = không quyết định, `.unknown` = không đọc được).
+    static func state(ofLine line: Data, skipSidechain: Bool) -> State? {
+        switch verdict(ofLine: line, skipSidechain: skipSidechain) {
+        case .some(.decided(let s)): return s
+        case .some(.unreadable): return .unknown
+        default: return nil
         }
     }
 
@@ -407,21 +505,25 @@ enum Transcript {
             let stop = message?["stop_reason"] as? String
             return (stop == nil || stop == "tool_use") ? .inTurn : .idle
         case "user":
-            let text = flatText(message?["content"])
-            if text.contains("[Request interrupted by user") { return .idle }
-            if text.contains("<local-command-stdout>") || text.contains("<local-command-stderr>") { return .idle }
+            // Các dấu hiệu luôn ở đầu từng phần nội dung; chỉ xét vài trăm ký tự đầu để không phải
+            // quét cả kết quả lệnh / ảnh dài hàng MB.
+            for head in textHeads(message?["content"]) {
+                if head.contains("[Request interrupted by user") { return .idle }
+                if head.contains("<local-command-stdout>") || head.contains("<local-command-stderr>") { return .idle }
+            }
             return .inTurn
         default:
             return nil
         }
     }
 
-    private static func flatText(_ content: Any?) -> String {
-        if let s = content as? String { return s }
-        guard let parts = content as? [[String: Any]] else { return "" }
-        return parts.map { part in
-            if let t = part["text"] as? String { return t }
-            return flatText(part["content"])
-        }.joined(separator: "\n")
+    /// 300 ký tự đầu của mỗi phần văn bản trong nội dung tin nhắn (kể cả bên trong tool_result).
+    private static func textHeads(_ content: Any?) -> [Substring] {
+        if let s = content as? String { return [s.prefix(300)] }
+        guard let parts = content as? [[String: Any]] else { return [] }
+        return parts.flatMap { part -> [Substring] in
+            if let t = part["text"] as? String { return [t.prefix(300)] }
+            return textHeads(part["content"])
+        }
     }
 }

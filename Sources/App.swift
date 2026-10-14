@@ -17,11 +17,17 @@ enum Diagnose {
     static func run() {
         let info = Bundle.main.infoDictionary
         print("KeepAwake \(info?["CFBundleShortVersionString"] ?? "dev") (\(info?["CFBundleVersion"] ?? "0")), macOS \(ProcessInfo.processInfo.operatingSystemVersionString)")
-        let sessions = ClaudeScanner.scan(maxTaskAge: 4 * 3600)
-        if sessions.isEmpty { print("\nNo Claude Code processes found.") }
-        for s in sessions {
+        let hours = UserDefaults.standard.object(forKey: "maxTaskHours") as? Int ?? 4
+        print("Ignore background tasks after: " + (hours > 0 ? "\(hours) h" : "no limit"))
+        let result = ClaudeScanner.diagnose(maxTaskAge: hours > 0 ? TimeInterval(hours * 3600) : nil)
+        if result.sessions.isEmpty { print("\nNo Claude Code sessions found.") }
+        for s in result.sessions {
             print("\n== pid \(s.id)  \(s.project)  [\(s.client ?? "?")]  →  \(s.isBusy ? "BUSY" : "idle") (working=\(s.working), tasks=\(s.taskAges.count))")
             s.debug.forEach { print("   " + $0) }
+        }
+        if !result.skipped.isEmpty {
+            print("\nSkipped processes:")
+            result.skipped.forEach { print("   " + $0) }
         }
         print("\nSleep blockers: " + SleepBlockers.all().map(\.description).joined(separator: ", "))
     }

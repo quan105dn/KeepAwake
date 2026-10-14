@@ -90,6 +90,8 @@ final class AwakeManager: ObservableObject {
     private var activityAssertion: IOPMAssertionID = 0
     private var activityTimer: Timer?
     private var scanTimer: Timer?
+    private let scanQueue = DispatchQueue(label: "KeepAwake.scan", qos: .utility)
+    private var scanInFlight = false
     private var lastBusy = Date()
     private var lastForcedSleep = Date.distantPast
     private var wasBusy = false
@@ -167,14 +169,21 @@ final class AwakeManager: ObservableObject {
         }
     }
 
+    /// Quét ở luồng nền (đọc transcript có thể mất vài chục ms), cập nhật trạng thái ở luồng chính.
     private func scanClaude() {
-        guard mode == .claude else { return }
+        guard mode == .claude, !scanInFlight else { return }
+        scanInFlight = true
         let maxAge = maxTaskHours > 0 ? TimeInterval(maxTaskHours * 3600) : nil
-        let sessions = ClaudeScanner.scan(maxTaskAge: maxAge)
-        busySessions = sessions.filter(\.isBusy)
-        ignoredTasks = sessions.reduce(0) { $0 + $1.ignoredTasks }
-
-        update(busy: !busySessions.isEmpty, now: Date())
+        scanQueue.async {
+            let sessions = ClaudeScanner.scan(maxTaskAge: maxAge)
+            DispatchQueue.main.async {
+                self.scanInFlight = false
+                guard self.mode == .claude else { return }
+                self.busySessions = sessions.filter(\.isBusy)
+                self.ignoredTasks = sessions.reduce(0) { $0 + $1.ignoredTasks }
+                self.update(busy: !self.busySessions.isEmpty, now: Date())
+            }
+        }
     }
 
     /// Giữ / nhả assertion và ép ngủ khi cần. Tách riêng để test được.

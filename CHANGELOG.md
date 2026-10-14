@@ -5,18 +5,20 @@ All notable changes to KeepAwake are documented here. The project follows [Seman
 ## [1.1.1] - 2026-10-14
 
 ### Fixed
-- **Follow Claude Code** treated a working session as idle when the latest transcript entry was very large, for
-  example a pasted screenshot, an image Claude read, or long command output. Lines of several MB are common; the
-  reader only looked at the last 256 KB. It now reads backwards to the last complete entry (up to 64 MB) and caches
-  results per file.
-- Entries containing lone UTF-16 surrogates (from output truncated mid-emoji) were rejected by the JSON parser and
-  skipped. They are now repaired before parsing, with a key-based fallback for other malformed lines.
-- An unreadable transcript was reported as "idle" instead of falling back to Claude Code's `caffeinate`.
-- Helper processes run from the `claude` binary (e.g. `ugrep` for the Grep tool) are no longer counted as sessions.
+- **Follow Claude Code** treated a working session as idle when the latest transcript entry was very large, such as
+  a pasted screenshot, an image Claude read or long command output. Lines of several MB are common, and the reader
+  only looked at the last 256 KB. It now reads backwards to the last complete entry, in linear time (a 40 MB line
+  takes about 70 ms), up to 64 MB. Results are cached per file, and scanning runs off the main thread.
+- Entries with lone UTF-16 surrogates (from output truncated mid-emoji) were rejected by the JSON parser. They are now
+  repaired before parsing. A line that still can't be read falls back to Claude Code's `caffeinate` instead of being
+  reported as idle. A final line that is still being written is skipped.
+- A new session whose transcript has only metadata lines is idle, not "unknown".
+- Helper processes run from the `claude` binary (`ugrep`, `rg`) are no longer counted as sessions.
 
 ### Added
-- `KeepAwake --diagnose` prints how the app sees every Claude Code session (read-only), for bug reports:
-  `/Applications/KeepAwake.app/Contents/MacOS/KeepAwake --diagnose`
+- `KeepAwake --diagnose` prints how the app sees every Claude Code session and every skipped process, with the reason.
+  It is read-only and uses your background-task limit. Command lines are redacted to flags, so prompt text is never
+  printed. Run: `/Applications/KeepAwake.app/Contents/MacOS/KeepAwake --diagnose`
 
 ## [1.1.0] - 2026-10-14
 
