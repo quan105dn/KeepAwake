@@ -22,6 +22,8 @@ enum ClaudeScanner {
         /// Tuổi (giây) của các tác vụ shell đang chạy, đã lọc theo giới hạn.
         var taskAges: [TimeInterval] = []
         var ignoredTasks = 0
+        /// Giải thích quyết định, dùng cho `KeepAwake --diagnose`.
+        var debug: [String] = []
         var isBusy: Bool { working || !taskAges.isEmpty }
     }
 
@@ -48,9 +50,14 @@ enum ClaudeScanner {
             let dir = registry?.cwd ?? cwd(of: claude.pid)
             var s = Session(id: claude.pid, project: dir.map { ($0 as NSString).lastPathComponent } ?? "Claude Code")
             s.client = clientName(entrypoint: registry?.entrypoint, termProgram: env["TERM_PROGRAM"])
+            s.debug.append("args: " + args.joined(separator: " ").prefix(100))
+            s.debug.append("registry: " + (registry.map { "session=\($0.sessionId) entrypoint=\($0.entrypoint ?? "-")" }
+                                           ?? "none (\(configDir)/sessions/\(claude.pid).json)"))
+            s.debug.append("cwd: \(dir ?? "?")")
 
             var caffeinate = false
             for child in procs where child.ppid == claude.pid {
+                s.debug.append("child: \(child.pid) \(child.name) (\(Int(now.timeIntervalSince(child.start)))s)")
                 switch child.name {
                 case "caffeinate":
                     caffeinate = true
@@ -66,6 +73,7 @@ enum ClaudeScanner {
             var state = Transcript.State.unknown
             if let dir {
                 let projectDir = Transcript.projectDirectory(configDir: configDir, cwd: dir)
+                s.debug.append("project dir: \(projectDir) [\(FileManager.default.fileExists(atPath: projectDir) ? "exists" : "MISSING")]")
                 if let sessionId = registry?.sessionId {
                     // Biết chính xác phiên của tiến trình này (~/.claude/sessions/<pid>.json).
                     state = Transcript.state(ofSession: sessionId, inProjectDirectory: projectDir, now: now)
@@ -76,6 +84,7 @@ enum ClaudeScanner {
                     transcriptCache[projectDir] = state
                 }
             }
+            s.debug.append("transcript state: \(state); caffeinate child: \(caffeinate); tool shells: \(s.taskAges.count) (+\(s.ignoredTasks) ignored)")
             switch state {
             case .inTurn: s.working = true
             case .idle: s.working = false
@@ -134,9 +143,14 @@ enum ClaudeScanner {
         }
     }
 
-    /// Tiến trình phụ của Claude Code, không phải một phiên làm việc (vd. cầu nối Chrome, MCP server).
+    /// Tiến trình phụ của Claude Code, không phải một phiên làm việc (vd. cầu nối Chrome, MCP server, ugrep).
+    /// Binary `claude` cũng được dùng để chạy công cụ phụ (vd. `ugrep` cho Grep), khi đó argv[0] là tên công cụ.
     private static func isHelper(args: [String]) -> Bool {
-        args.contains("--chrome-native-host") || (args.count >= 3 && args[1] == "mcp" && args[2] == "serve")
+        if let first = args.first, !first.isEmpty {
+            let name = (first as NSString).lastPathComponent
+            if name != "node", !name.lowercased().contains("claude") { return true }
+        }
+        return args.contains("--chrome-native-host") || (args.count >= 3 && args[1] == "mcp" && args[2] == "serve")
     }
 
     private static func allProcesses() -> [Proc] {
@@ -244,39 +258,49 @@ enum Transcript {
     static func state(ofProjectDirectory dir: String, now: Date) -> State {
         let fm = FileManager.default
         guard let entries = try? fm.contentsOfDirectory(atPath: dir) else { return .unknown }
-        var sawTranscript = false
+        var sawTranscript = false, unreadable = false
         for entry in entries {
             let path = (dir as NSString).appendingPathComponent(entry)
             if entry.hasSuffix(".jsonl") {
                 sawTranscript = true
-                if isRecent(path, now: now), lastState(ofFile: path, skipSidechain: true) == .inTurn { return .inTurn }
-            } else {
-                // <session>/subagents/*.jsonl: subagent chạy nền sau khi lượt chính đã xong.
-                let sub = (path as NSString).appendingPathComponent("subagents")
-                guard isRecent(sub, now: now), let files = try? fm.contentsOfDirectory(atPath: sub) else { continue }
-                for f in files where f.hasSuffix(".jsonl") {
-                    let p = (sub as NSString).appendingPathComponent(f)
-                    if isRecent(p, now: now), lastState(ofFile: p, skipSidechain: false) == .inTurn { return .inTurn }
+                guard isRecent(path, now: now) else { continue }
+                switch lastState(ofFile: path, skipSidechain: true) {
+                case .inTurn: return .inTurn
+                case .unknown: unreadable = true
+                case .idle: break
                 }
+            } else if subagentsInTurn(sessionDirectory: path, now: now) {
+                return .inTurn
             }
         }
-        return sawTranscript ? .idle : .unknown
+        if unreadable || !sawTranscript { return .unknown }
+        return .idle
     }
 
     /// Trạng thái của đúng một phiên: `<sessionId>.jsonl` và `<sessionId>/subagents/*.jsonl`.
     static func state(ofSession id: String, inProjectDirectory dir: String, now: Date) -> State {
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: dir) else { return .unknown }
+        guard FileManager.default.fileExists(atPath: dir) else { return .unknown }
         let main = (dir as NSString).appendingPathComponent(id + ".jsonl")
-        if isRecent(main, now: now), lastState(ofFile: main, skipSidechain: true) == .inTurn { return .inTurn }
-        let sub = ((dir as NSString).appendingPathComponent(id) as NSString).appendingPathComponent("subagents")
-        if isRecent(sub, now: now), let files = try? fm.contentsOfDirectory(atPath: sub) {
-            for f in files where f.hasSuffix(".jsonl") {
-                let p = (sub as NSString).appendingPathComponent(f)
-                if isRecent(p, now: now), lastState(ofFile: p, skipSidechain: false) == .inTurn { return .inTurn }
-            }
+        var mainState = State.idle   // chưa có transcript (phiên mới chưa nhận lời nhắn) = đang rảnh
+        if isRecent(main, now: now) {
+            mainState = lastState(ofFile: main, skipSidechain: true)
+            if mainState == .inTurn { return .inTurn }
         }
-        return .idle   // chưa có transcript (phiên mới chưa nhận lời nhắn) cũng là đang rảnh
+        if subagentsInTurn(sessionDirectory: (dir as NSString).appendingPathComponent(id), now: now) { return .inTurn }
+        return mainState   // .unknown → để bên gọi dùng `caffeinate` làm dự phòng
+    }
+
+    /// `<session>/subagents/*.jsonl`: subagent (kể cả chạy nền sau khi lượt chính đã xong).
+    private static func subagentsInTurn(sessionDirectory: String, now: Date) -> Bool {
+        let sub = (sessionDirectory as NSString).appendingPathComponent("subagents")
+        guard isRecent(sub, now: now), let files = try? FileManager.default.contentsOfDirectory(atPath: sub) else {
+            return false
+        }
+        for f in files where f.hasSuffix(".jsonl") {
+            let p = (sub as NSString).appendingPathComponent(f)
+            if isRecent(p, now: now), lastState(ofFile: p, skipSidechain: false) == .inTurn { return true }
+        }
+        return false
     }
 
     private static func isRecent(_ path: String, now: Date) -> Bool {
@@ -285,20 +309,89 @@ enum Transcript {
         return now.timeIntervalSince(m) < staleAfter
     }
 
-    /// Đọc phần cuối file và xét dòng có ý nghĩa gần nhất.
+    /// Đọc ngược từ cuối file tới dòng có ý nghĩa gần nhất. Dòng có thể rất dài (ảnh, kết quả lệnh lớn:
+    /// vài MB), nên đọc từng khối 256 KB cho tới khi có dòng hoàn chỉnh, tối đa `maxScan`.
+    /// Kết quả được nhớ theo (kích thước, thời điểm sửa) để không đọc lại file không đổi.
     static func lastState(ofFile path: String, skipSidechain: Bool) -> State {
-        guard let handle = FileHandle(forReadingAtPath: path) else { return .unknown }
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+              let size = (attrs[.size] as? NSNumber)?.uint64Value,
+              let mtime = attrs[.modificationDate] as? Date else { return .unknown }
+        let key = "\(skipSidechain ? "m" : "s")|\(path)"
+        cacheLock.lock()
+        if let c = cache[key], c.size == size, c.mtime == mtime { cacheLock.unlock(); return c.state }
+        cacheLock.unlock()
+
+        let state = scanBackwards(path: path, size: size, skipSidechain: skipSidechain)
+        cacheLock.lock()
+        if cache.count > 512 { cache.removeAll() }
+        cache[key] = (size, mtime, state)
+        cacheLock.unlock()
+        return state
+    }
+
+    static let maxScan: UInt64 = 64 * 1024 * 1024
+    private static let chunk: UInt64 = 256 * 1024
+    private static var cache: [String: (size: UInt64, mtime: Date, state: State)] = [:]
+    private static let cacheLock = NSLock()
+
+    private static func scanBackwards(path: String, size: UInt64, skipSidechain: Bool) -> State {
+        guard size > 0, let handle = FileHandle(forReadingAtPath: path) else { return .unknown }
         defer { try? handle.close() }
-        let size = handle.seekToEndOfFile()
-        let window: UInt64 = 256 * 1024
-        handle.seek(toFileOffset: size > window ? size - window : 0)
-        let data = handle.readDataToEndOfFile()
-        let lines = data.split(separator: UInt8(ascii: "\n"))
-        for line in lines.reversed() {
-            guard let obj = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else { continue }
-            if let s = state(ofEntry: obj, skipSidechain: skipSidechain) { return s }
+        let newline = UInt8(ascii: "\n")
+        var buffer = Data()         // byte từ `pos` tới phần đã xử lý (chưa thành dòng hoàn chỉnh)
+        var pos = size
+        while pos > 0, size - pos < maxScan {
+            let readSize = min(chunk, pos)
+            pos -= readSize
+            handle.seek(toFileOffset: pos)
+            buffer = handle.readData(ofLength: Int(readSize)) + buffer
+            // Tách các dòng hoàn chỉnh ở cuối buffer (đứng sau một ký tự xuống dòng).
+            while let nl = buffer.lastIndex(of: newline) {
+                let line = buffer[buffer.index(after: nl)...]
+                buffer = buffer[..<nl]
+                if !line.isEmpty, let s = state(ofLine: Data(line), skipSidechain: skipSidechain) { return s }
+            }
         }
+        // Dòng đầu file (không có ký tự xuống dòng đứng trước).
+        if pos == 0, !buffer.isEmpty, let s = state(ofLine: buffer, skipSidechain: skipSidechain) { return s }
         return .unknown
+    }
+
+    /// nil = dòng không quyết định trạng thái (hoặc không đọc được).
+    static func state(ofLine line: Data, skipSidechain: Bool) -> State? {
+        if let obj = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any] {
+            return state(ofEntry: obj, skipSidechain: skipSidechain)
+        }
+        // JSON.stringify của Claude Code giữ nguyên surrogate lẻ ("\ud83d", khi cắt ngắn giữa emoji),
+        // JSONSerialization từ chối → thay chúng rồi thử lại.
+        if let text = String(data: line, encoding: .utf8) {
+            let cleaned = text.replacingOccurrences(of: #"\\u[dD][89a-fA-F][0-9a-fA-F]{2}"#, with: #"\\ufffd"#,
+                                                    options: .regularExpression)
+            if cleaned != text, let obj = (try? JSONSerialization.jsonObject(with: Data(cleaned.utf8))) as? [String: Any] {
+                return state(ofEntry: obj, skipSidechain: skipSidechain)
+            }
+            return heuristicState(text, skipSidechain: skipSidechain)
+        }
+        return nil
+    }
+
+    /// Dự phòng cuối khi dòng vẫn không phải JSON hợp lệ: đọc vài khoá ở đầu dòng.
+    private static func heuristicState(_ text: String, skipSidechain: Bool) -> State? {
+        let head = text.prefix(4096)
+        if skipSidechain, head.contains(#""isSidechain":true"#) { return nil }
+        if head.contains(#""isMeta":true"#) { return nil }
+        guard let r = head.range(of: #""type":"(user|assistant|system)""#, options: .regularExpression) else { return nil }
+        switch head[r] {
+        case #""type":"system""#:
+            return (head.contains(#""subtype":"turn_duration""#) || head.contains(#""subtype":"local_command""#)) ? .idle : nil
+        case #""type":"assistant""#:
+            for stop in ["end_turn", "stop_sequence", "max_tokens", "refusal", "pause_turn"]
+            where text.contains(#""stop_reason":"\#(stop)""#) { return .idle }
+            return .inTurn
+        default:
+            if text.contains("[Request interrupted by user") || text.contains("<local-command-stdout>") { return .idle }
+            return .inTurn
+        }
     }
 
     /// nil = dòng không quyết định trạng thái (metadata, attachment…), xét tiếp dòng trước.

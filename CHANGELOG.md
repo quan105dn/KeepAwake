@@ -2,6 +2,22 @@
 
 All notable changes to KeepAwake are documented here. The project follows [Semantic Versioning](https://semver.org).
 
+## [1.1.1] - 2026-10-14
+
+### Fixed
+- **Follow Claude Code** treated a working session as idle when the latest transcript entry was very large, for
+  example a pasted screenshot, an image Claude read, or long command output. Lines of several MB are common; the
+  reader only looked at the last 256 KB. It now reads backwards to the last complete entry (up to 64 MB) and caches
+  results per file.
+- Entries containing lone UTF-16 surrogates (from output truncated mid-emoji) were rejected by the JSON parser and
+  skipped. They are now repaired before parsing, with a key-based fallback for other malformed lines.
+- An unreadable transcript was reported as "idle" instead of falling back to Claude Code's `caffeinate`.
+- Helper processes run from the `claude` binary (e.g. `ugrep` for the Grep tool) are no longer counted as sessions.
+
+### Added
+- `KeepAwake --diagnose` prints how the app sees every Claude Code session (read-only), for bug reports:
+  `/Applications/KeepAwake.app/Contents/MacOS/KeepAwake --diagnose`
+
 ## [1.1.0] - 2026-10-14
 
 ### Fixed
@@ -35,5 +51,6 @@ First public release.
 - About screen with version, license and source links.
 - Local diagnostic log at `~/Library/Logs/KeepAwake.log`.
 
+[1.1.1]: https://github.com/quan105dn/KeepAwake/releases/tag/v1.1.1
 [1.1.0]: https://github.com/quan105dn/KeepAwake/releases/tag/v1.1.0
 [1.0.0]: https://github.com/quan105dn/KeepAwake/releases/tag/v1.0.0

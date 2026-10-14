@@ -152,6 +152,18 @@ KeepAwake was built to be something you can trust on your machine.
 - Release builds are for Apple Silicon only. Intel Macs can try building from source after changing the target
   in `build.sh`; this is untested.
 
+## Troubleshooting
+
+If *Follow Claude Code* doesn't pick up a session, run this while Claude is working. It only reads; nothing is changed:
+
+```bash
+/Applications/KeepAwake.app/Contents/MacOS/KeepAwake --diagnose
+```
+
+It lists every Claude Code process the app found, where it runs, its transcript state, and why it counts as busy or
+idle. Please attach the output to a [GitHub issue](https://github.com/quan105dn/KeepAwake/issues).
+The diagnostic log lives at `~/Library/Logs/KeepAwake.log`.
+
 ## How it works
 
 | Feature | Mechanism |

@@ -1,6 +1,32 @@
 import SwiftUI
 
 @main
+enum Launcher {
+    static func main() {
+        if CommandLine.arguments.contains("--diagnose") {
+            Diagnose.run()
+            return
+        }
+        KeepAwakeApp.main()
+    }
+}
+
+/// `/Applications/KeepAwake.app/Contents/MacOS/KeepAwake --diagnose`: in ra cách app nhìn thấy từng phiên
+/// Claude Code (chỉ đọc, không đổi gì), để gửi kèm khi báo lỗi.
+enum Diagnose {
+    static func run() {
+        let info = Bundle.main.infoDictionary
+        print("KeepAwake \(info?["CFBundleShortVersionString"] ?? "dev") (\(info?["CFBundleVersion"] ?? "0")), macOS \(ProcessInfo.processInfo.operatingSystemVersionString)")
+        let sessions = ClaudeScanner.scan(maxTaskAge: 4 * 3600)
+        if sessions.isEmpty { print("\nNo Claude Code processes found.") }
+        for s in sessions {
+            print("\n== pid \(s.id)  \(s.project)  [\(s.client ?? "?")]  →  \(s.isBusy ? "BUSY" : "idle") (working=\(s.working), tasks=\(s.taskAges.count))")
+            s.debug.forEach { print("   " + $0) }
+        }
+        print("\nSleep blockers: " + SleepBlockers.all().map(\.description).joined(separator: ", "))
+    }
+}
+
 struct KeepAwakeApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var awake = AwakeManager.shared

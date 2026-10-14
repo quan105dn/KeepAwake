@@ -99,6 +99,17 @@ cd KeepAwake
 > *Khoá ngay* dùng hàm riêng `SACLockScreenImmediate` của macOS. Nếu bản macOS sau bỏ hàm này, nút sẽ chỉ tắt
 > màn hình.
 
+## Khi gặp lỗi
+
+Nếu chế độ *Theo Claude Code* không nhận ra phiên, chạy lệnh sau lúc Claude đang làm việc (chỉ đọc, không thay đổi gì):
+
+```bash
+/Applications/KeepAwake.app/Contents/MacOS/KeepAwake --diagnose
+```
+
+Lệnh in ra từng phiên Claude Code mà app thấy, nơi chạy, trạng thái transcript và lý do bận hay rảnh. Gửi kèm kết quả
+khi báo lỗi trên [GitHub](https://github.com/quan105dn/KeepAwake/issues).
+
 ## Giới hạn
 
 - Gập nắp MacBook thì máy luôn ngủ (trừ khi dùng clamshell: cắm sạc, có màn hình ngoài, bàn phím và chuột rời).
