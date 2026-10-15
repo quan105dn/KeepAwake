@@ -53,8 +53,9 @@ enum ClaudeScanner {
 
         for claude in procs {
             guard isClaudeCode(claude) else {
-                if diag, claude.name == "node", argv(of: claude.pid).joined(separator: " ").contains("claude") {
-                    skipped.append("pid \(claude.pid) node: not recognised as Claude Code (\(redacted(argv(of: claude.pid))))")
+                if diag, execPath(of: claude.pid).map({ $0.contains("/claude/") || ($0 as NSString).lastPathComponent.contains("claude") }) ?? false
+                    || (claude.name == "node" && argv(of: claude.pid).joined(separator: " ").contains("claude")) {
+                    skipped.append("pid \(claude.pid) \(claude.name): not recognised as Claude Code (\(execPath(of: claude.pid) ?? "?"); \(redacted(argv(of: claude.pid))))")
                 }
                 continue
             }
@@ -145,9 +146,23 @@ enum ClaudeScanner {
     }
 
     /// Bản native / extension: tiến trình `claude` / `claude.exe`.
+    /// Bản native installer: `~/.local/bin/claude` là symlink tới `~/.local/share/claude/versions/<phiên bản>`,
+    /// nên tên tiến trình trong kernel là số phiên bản (vd. "2.1.300") → nhận theo đường dẫn file chạy.
+    /// Bản cũ bị trình cập nhật xoá khi phiên vẫn chạy thì không còn đường dẫn → dùng argv[0] == "claude".
+    /// (Công cụ phụ như `ugrep` chạy từ cùng binary có argv[0] là tên công cụ, `helperReason` lọc tiếp.)
     /// Bản cài qua npm: `node …/bin/claude` hoặc `node …/@anthropic-ai/claude-code/cli.js`.
     private static func isClaudeCode(_ p: Proc) -> Bool {
         if p.name == "claude" || p.name == "claude.exe" { return true }
+        if let exe = execPath(of: p.pid) {
+            let dir = (exe as NSString).deletingLastPathComponent as NSString
+            if (exe as NSString).lastPathComponent == "claude"
+                || (dir.lastPathComponent == "versions"
+                    && (dir.deletingLastPathComponent as NSString).lastPathComponent == "claude") {
+                return true
+            }
+        } else if p.name != "node", let first = argv(of: p.pid).first {
+            return (first as NSString).lastPathComponent == "claude"
+        }
         guard p.name == "node" else { return false }
         let args = argv(of: p.pid)
         guard args.count >= 2 else { return false }
@@ -242,6 +257,13 @@ enum ClaudeScanner {
             i += 1
         }
         return (argv, env)
+    }
+
+    /// Đường dẫn file thực thi (đã giải symlink), khác `p_comm` khi file chạy được đặt tên khác.
+    private static func execPath(of pid: pid_t) -> String? {
+        var buf = [CChar](repeating: 0, count: Int(4 * MAXPATHLEN))
+        guard proc_pidpath(pid, &buf, UInt32(buf.count)) > 0 else { return nil }
+        return String(cString: buf)
     }
 
     private static func cwd(of pid: pid_t) -> String? {

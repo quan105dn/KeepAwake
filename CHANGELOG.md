@@ -2,6 +2,15 @@
 
 All notable changes to KeepAwake are documented here. The project follows [Semantic Versioning](https://semver.org).
 
+## [1.1.2] - 2026-10-15
+
+### Fixed
+- **Follow Claude Code** found no sessions at all with Claude Code's native installer. `~/.local/bin/claude` is a symlink
+  to `~/.local/share/claude/versions/<version>`, so the kernel names the process after the version (`2.1.300`), not
+  `claude`. Sessions are now recognised by their executable path, or by `argv[0]` when the updater has already deleted
+  the running version's binary. The same check let Claude Code's own `caffeinate` pass as one started by the user.
+- `--diagnose` now lists unrecognised processes whose executable looks like Claude Code, not only `node` ones.
+
 ## [1.1.1] - 2026-10-14
 
 ### Fixed
